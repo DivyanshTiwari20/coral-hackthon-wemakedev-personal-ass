@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { updateAssignmentStatus } from "@/lib/db";
+import { deleteAssignment, updateAssignmentStatus } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -37,6 +37,34 @@ export async function PATCH(
 
     return NextResponse.json(
       { error: "Failed to update assignment." },
+      { status: 500 },
+    );
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  context: RouteContext<"/api/assignments/[id]">,
+) {
+  try {
+    const { id } = await context.params;
+    const assignmentId = Number(id);
+
+    if (Number.isNaN(assignmentId)) {
+      return NextResponse.json(
+        { error: "Assignment id must be numeric." },
+        { status: 400 },
+      );
+    }
+
+    deleteAssignment(assignmentId);
+
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    console.error("Delete assignment failed", error);
+
+    return NextResponse.json(
+      { error: "Failed to delete assignment." },
       { status: 500 },
     );
   }

@@ -29,6 +29,16 @@ export type ChatHistoryMessage = {
   role: ChatRole;
   content: string;
   created_at: string;
+  session_id?: number | null;
+};
+
+export type ChatSession = {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  last_message: string | null;
 };
 
 export type CalendarEvent = {
@@ -38,6 +48,8 @@ export type CalendarEvent = {
   start: string | null;
   end: string | null;
   htmlLink?: string | null;
+  source?: "google_calendar" | "google_task";
+  status?: string | null;
 };
 
 export type CoralRow = Record<string, string | number | null>;
@@ -45,10 +57,13 @@ export type CoralRow = Record<string, string | number | null>;
 export type ChatIntent =
   | "add_assignment"
   | "mark_submitted"
+  | "delete_assignment"
   | "add_task"
   | "mark_task_done"
+  | "delete_task"
   | "query_github"
   | "query_calendar"
+  | "create_calendar_event"
   | "query_assignments"
   | "query_tasks"
   | "general_chat";

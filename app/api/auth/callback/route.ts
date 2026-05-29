@@ -86,7 +86,7 @@ export async function GET(request: Request) {
     `);
   }
 
-  const redirectUri = `${url.origin}${url.pathname}`;
+  const redirectUri = getRequiredEnv("GOOGLE_CALENDAR_REDIRECT_URI");
 
   try {
     const oauth2Client = new google.auth.OAuth2(
@@ -100,7 +100,7 @@ export async function GET(request: Request) {
     return renderHtml(`
       <h1>Authorization successful</h1>
       <p>Google redirected here with a valid code and the app exchanged it successfully.</p>
-      <p>Use this refresh token in your <code>.env.local</code> as <code>GOOGLE_CALENDAR_REFRESH_TOKEN</code>.</p>
+      <p>Use this refresh token in your <code>.env.local</code> as <code>GOOGLE_CALENDAR_REFRESH_TOKEN</code>. This consent flow now includes Google Calendar and Google Tasks access.</p>
       <pre>${tokens.refresh_token ?? "No refresh token was returned. Re-run consent with prompt=consent and access_type=offline."}</pre>
       <p>Authorization code used:</p>
       <pre>${code}</pre>

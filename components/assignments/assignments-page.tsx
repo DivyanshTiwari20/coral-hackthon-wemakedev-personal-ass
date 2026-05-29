@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, RefreshCcw } from "lucide-react";
+import { CheckCircle2, Plus, RefreshCcw, RotateCcw, Trash2 } from "lucide-react";
 
 import {
   Dialog,
@@ -20,13 +20,19 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import type { Assignment } from "@/lib/types";
+import { readClientCache, writeClientCache } from "@/lib/client-cache";
+import type { Assignment, AssignmentStatus } from "@/lib/types";
 
 type AssignmentsPayload = {
   assignments: Assignment[];
 };
 
 const statusOptions = ["all", "pending", "submitted"] as const;
+const assignmentsCacheMaxAgeMs = 5 * 60 * 1000;
+
+function getAssignmentsCacheKey(status: string, subject: string) {
+  return `amaze:assignments:v1:${status}:${subject.trim().toLowerCase()}`;
+}
 
 function AssignmentsSkeleton() {
   return (
@@ -52,9 +58,21 @@ export function AssignmentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  function loadAssignments(nextStatus = status, nextSubject = subjectFilter) {
+  function loadAssignments(
+    nextStatus = status,
+    nextSubject = subjectFilter,
+    preferCache = true,
+  ) {
     setError(null);
     const params = new URLSearchParams();
+    const cacheKey = getAssignmentsCacheKey(nextStatus, nextSubject);
+    const cachedPayload = preferCache
+      ? readClientCache<AssignmentsPayload>(cacheKey, assignmentsCacheMaxAgeMs)
+      : null;
+
+    if (cachedPayload) {
+      setAssignments(cachedPayload.assignments);
+    }
 
     if (nextStatus !== "all") {
       params.set("status", nextStatus);
@@ -64,7 +82,7 @@ export function AssignmentsPage() {
       params.set("subject", nextSubject.trim());
     }
 
-    setIsLoading(true);
+    setIsLoading(!cachedPayload);
 
     void (async () => {
       try {
@@ -80,9 +98,12 @@ export function AssignmentsPage() {
 
         const payload = (await response.json()) as AssignmentsPayload;
         setAssignments(payload.assignments);
+        writeClientCache(cacheKey, payload);
       } catch (assignmentsError) {
         console.error(assignmentsError);
-        setError("Assignments could not be loaded.");
+        if (!cachedPayload) {
+          setError("Assignments could not be loaded.");
+        }
       } finally {
         setIsLoading(false);
       }
@@ -90,25 +111,11 @@ export function AssignmentsPage() {
   }
 
   useEffect(() => {
-    setError(null);
-    setIsLoading(true);
+    const timeoutId = window.setTimeout(() => loadAssignments("all", ""), 0);
 
-    void (async () => {
-      try {
-        const response = await fetch("/api/assignments", { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error("Assignments request failed");
-        }
-
-        const payload = (await response.json()) as AssignmentsPayload;
-        setAssignments(payload.assignments);
-      } catch (assignmentsError) {
-        console.error(assignmentsError);
-        setError("Assignments could not be loaded.");
-      } finally {
-        setIsLoading(false);
-      }
-    })();
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, []);
 
   function handleAddAssignment() {
@@ -142,7 +149,7 @@ export function AssignmentsPage() {
 
         setForm({ subject: "", title: "", due_date: "", notes: "" });
         setIsDialogOpen(false);
-        loadAssignments();
+        loadAssignments(status, subjectFilter, false);
       } catch (createError) {
         console.error(createError);
         setError("The assignment could not be created.");
@@ -151,7 +158,7 @@ export function AssignmentsPage() {
     })();
   }
 
-  function handleMarkSubmitted(id: number) {
+  function handleUpdateStatus(id: number, nextStatus: AssignmentStatus) {
     setIsLoading(true);
 
     void (async () => {
@@ -161,14 +168,14 @@ export function AssignmentsPage() {
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ status: "submitted" }),
+          body: JSON.stringify({ status: nextStatus }),
         });
 
         if (!response.ok) {
           throw new Error("Update assignment failed");
         }
 
-        loadAssignments();
+        loadAssignments(status, subjectFilter, false);
       } catch (updateError) {
         console.error(updateError);
         setError("The assignment status could not be updated.");
@@ -177,26 +184,53 @@ export function AssignmentsPage() {
     })();
   }
 
+  function handleDeleteAssignment(id: number) {
+    setIsLoading(true);
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/assignments/${id}`, {
+          method: "DELETE",
+        });
+
+        if (!response.ok) {
+          throw new Error("Delete assignment failed");
+        }
+
+        loadAssignments(status, subjectFilter, false);
+      } catch (deleteError) {
+        console.error(deleteError);
+        setError("The assignment could not be deleted.");
+        setIsLoading(false);
+      }
+    })();
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
+        <div className="min-w-0">
           <Badge className="mb-3" variant="secondary">
             Coursework tracker
           </Badge>
-          <h2 className="text-3xl font-semibold text-zinc-50">Assignments</h2>
+          <h2 className="text-2xl font-semibold text-zinc-50 sm:text-3xl">Assignments</h2>
           <p className="mt-2 text-sm text-zinc-400">
             Add, filter, and submit assignments here or through chat.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <Button variant="outline" onClick={() => loadAssignments()} disabled={isLoading}>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <Button
+            variant="outline"
+            className="w-full sm:w-auto"
+            onClick={() => loadAssignments(status, subjectFilter, false)}
+            disabled={isLoading}
+          >
             <RefreshCcw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
           <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
             <DialogTrigger asChild>
-              <Button>
+              <Button className="w-full sm:w-auto">
                 <Plus className="size-4" />
                 Add assignment
               </Button>
@@ -258,7 +292,7 @@ export function AssignmentsPage() {
             <CardTitle>Current queue</CardTitle>
             <CardDescription>Filter by status and subject.</CardDescription>
           </div>
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <Tabs
               value={status}
               onValueChange={(value) => {
@@ -275,7 +309,7 @@ export function AssignmentsPage() {
                 ))}
               </TabsList>
             </Tabs>
-            <div className="flex w-full max-w-sm items-center gap-2">
+            <div className="flex w-full flex-col gap-2 sm:max-w-sm sm:flex-row sm:items-center">
               <Input
                 placeholder="Filter by subject"
                 value={subjectFilter}
@@ -289,6 +323,7 @@ export function AssignmentsPage() {
               <Button
                 variant="outline"
                 size="sm"
+                className="w-full sm:w-auto"
                 onClick={() => loadAssignments(status, subjectFilter)}
                 disabled={isLoading}
               >
@@ -308,45 +343,71 @@ export function AssignmentsPage() {
           ) : null}
 
           {assignments.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Subject</TableHead>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Due Date</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {assignments.map((assignment) => (
-                  <TableRow key={assignment.id}>
-                    <TableCell>{assignment.subject}</TableCell>
-                    <TableCell>{assignment.title}</TableCell>
-                    <TableCell>{assignment.due_date ?? "No due date"}</TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={
-                          assignment.status === "submitted" ? "secondary" : "default"
-                        }
-                      >
-                        {assignment.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={assignment.status === "submitted" || isLoading}
-                        onClick={() => handleMarkSubmitted(assignment.id)}
-                      >
-                        Mark submitted
-                      </Button>
-                    </TableCell>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Subject</TableHead>
+                    <TableHead>Title</TableHead>
+                    <TableHead>Due Date</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {assignments.map((assignment) => (
+                    <TableRow key={assignment.id}>
+                      <TableCell>{assignment.subject}</TableCell>
+                      <TableCell>{assignment.title}</TableCell>
+                      <TableCell>{assignment.due_date ?? "No due date"}</TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            assignment.status === "submitted" ? "secondary" : "default"
+                          }
+                        >
+                          {assignment.status}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex min-w-48 justify-end gap-1">
+                          {assignment.status === "submitted" ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={isLoading}
+                              onClick={() => handleUpdateStatus(assignment.id, "pending")}
+                            >
+                              <RotateCcw className="size-4" />
+                              Mark pending
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={isLoading}
+                              onClick={() => handleUpdateStatus(assignment.id, "submitted")}
+                            >
+                              <CheckCircle2 className="size-4" />
+                              Mark submitted
+                            </Button>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={isLoading}
+                            onClick={() => handleDeleteAssignment(assignment.id)}
+                          >
+                            <Trash2 className="size-4" />
+                            Delete
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           ) : null}
         </CardContent>
       </Card>

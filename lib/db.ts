@@ -7,6 +7,7 @@ import type {
   AssignmentStatus,
   ChatHistoryMessage,
   ChatRole,
+  ChatSession,
   Task,
   TaskType,
 } from "@/lib/types";
@@ -41,11 +42,64 @@ function initializeDatabase(db: Database.Database) {
 
     CREATE TABLE IF NOT EXISTS chat_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER,
       role TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
   `);
+
+  migrateChatSessions(db);
+}
+
+function hasColumn(db: Database.Database, tableName: string, columnName: string) {
+  return db
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all()
+    .some((column) => {
+      const row = column as { name?: string };
+      return row.name === columnName;
+    });
+}
+
+function migrateChatSessions(db: Database.Database) {
+  if (!hasColumn(db, "chat_history", "session_id")) {
+    db.prepare("ALTER TABLE chat_history ADD COLUMN session_id INTEGER").run();
+  }
+
+  const orphanCount = db
+    .prepare("SELECT COUNT(*) as count FROM chat_history WHERE session_id IS NULL")
+    .get() as { count: number };
+
+  if (orphanCount.count === 0) {
+    return;
+  }
+
+  const existingSession = db
+    .prepare("SELECT id FROM chat_sessions ORDER BY id ASC LIMIT 1")
+    .get() as { id: number } | undefined;
+
+  const sessionId =
+    existingSession?.id ??
+    Number(
+      db
+        .prepare("INSERT INTO chat_sessions (title) VALUES (?)")
+        .run("Previous chat").lastInsertRowid,
+    );
+
+  db.prepare("UPDATE chat_history SET session_id = ? WHERE session_id IS NULL").run(sessionId);
+  db.prepare(
+    `UPDATE chat_sessions
+     SET updated_at = COALESCE((SELECT MAX(created_at) FROM chat_history WHERE session_id = ?), updated_at)
+     WHERE id = ?`,
+  ).run(sessionId, sessionId);
 }
 
 export function getDb() {
@@ -121,6 +175,11 @@ export function updateAssignmentStatus(id: number, status: AssignmentStatus) {
   return db
     .prepare("SELECT * FROM assignments WHERE id = ?")
     .get(id) as Assignment | undefined;
+}
+
+export function deleteAssignment(id: number) {
+  const db = getDb();
+  db.prepare("DELETE FROM assignments WHERE id = ?").run(id);
 }
 
 export function markAssignmentSubmitted(filters: {
@@ -239,26 +298,135 @@ export function markTaskDone(filters: { id?: number; title?: string }) {
   return task;
 }
 
-export function insertChatMessage(role: ChatRole, content: string) {
+export function deleteTask(id: number) {
+  const db = getDb();
+  db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+}
+
+function titleFromMessage(content: string) {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  return normalized.length > 44 ? `${normalized.slice(0, 44)}...` : normalized || "New chat";
+}
+
+export function createChatSession(title = "New chat") {
   const db = getDb();
   const result = db
-    .prepare("INSERT INTO chat_history (role, content) VALUES (?, ?)")
-    .run(role, content);
+    .prepare("INSERT INTO chat_sessions (title) VALUES (?)")
+    .run(title);
+  const session = getChatSession(Number(result.lastInsertRowid));
+
+  if (!session) {
+    throw new Error("Failed to create chat session.");
+  }
+
+  return session;
+}
+
+export function getChatSession(id: number) {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT
+        chat_sessions.*,
+        COUNT(chat_history.id) as message_count,
+        (
+          SELECT content
+          FROM chat_history
+          WHERE chat_history.session_id = chat_sessions.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) as last_message
+       FROM chat_sessions
+       LEFT JOIN chat_history ON chat_history.session_id = chat_sessions.id
+       WHERE chat_sessions.id = ?
+       GROUP BY chat_sessions.id`,
+    )
+    .get(id) as ChatSession | undefined;
+}
+
+export function listChatSessions(limit = 30) {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT
+        chat_sessions.*,
+        COUNT(chat_history.id) as message_count,
+        (
+          SELECT content
+          FROM chat_history
+          WHERE chat_history.session_id = chat_sessions.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) as last_message
+       FROM chat_sessions
+       LEFT JOIN chat_history ON chat_history.session_id = chat_sessions.id
+       GROUP BY chat_sessions.id
+       ORDER BY datetime(chat_sessions.updated_at) DESC, chat_sessions.id DESC
+       LIMIT ?`,
+    )
+    .all(limit) as ChatSession[];
+}
+
+export function getLatestChatSession() {
+  return listChatSessions(1)[0] ?? createChatSession();
+}
+
+export function insertChatMessage(role: ChatRole, content: string, sessionId?: number | null) {
+  const db = getDb();
+  let targetSessionId = sessionId ?? getLatestChatSession().id;
+
+  const session = getChatSession(targetSessionId);
+  if (!session) {
+    targetSessionId = createChatSession().id;
+  }
+
+  if (role === "user") {
+    const currentSession = getChatSession(targetSessionId);
+    if (currentSession && currentSession.message_count === 0) {
+      db.prepare("UPDATE chat_sessions SET title = ? WHERE id = ?").run(
+        titleFromMessage(content),
+        targetSessionId,
+      );
+    }
+  }
+
+  const result = db
+    .prepare("INSERT INTO chat_history (session_id, role, content) VALUES (?, ?, ?)")
+    .run(targetSessionId, role, content);
+
+  db.prepare("UPDATE chat_sessions SET updated_at = datetime('now') WHERE id = ?").run(
+    targetSessionId,
+  );
 
   return db
     .prepare("SELECT * FROM chat_history WHERE id = ?")
     .get(result.lastInsertRowid) as ChatHistoryMessage;
 }
 
-export function getRecentChatHistory(limit = 40) {
+export function getRecentChatHistory(limit = 40, sessionId?: number | null) {
   const db = getDb();
+
+  if (sessionId) {
+    return db
+      .prepare(
+        `SELECT * FROM chat_history
+         WHERE session_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(sessionId, limit)
+      .reverse() as ChatHistoryMessage[];
+  }
+
+  const latestSession = getLatestChatSession();
   return db
     .prepare(
       `SELECT * FROM chat_history
+       WHERE session_id = ?
        ORDER BY created_at DESC, id DESC
        LIMIT ?`,
     )
-    .all(limit)
+    .all(latestSession.id, limit)
     .reverse() as ChatHistoryMessage[];
 }
 
